@@ -1,0 +1,147 @@
+stages:
+  - image_building
+  - lint
+  - qa_deploy
+  - qa_test
+
+ 
+
+before_script:
+  - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+  - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+  - export AWS_DEFAULT_REGION="us-west-2"
+  - export USE_CASE=$USE_CASE
+  - export CLIENT=$CLIENT
+  - apt-get -y update
+  - apt install -y jq
+  - export PYTHONUNBUFFERED=TRUE
+  - pip install --no-cache-dir --upgrade --force-reinstall awscli boto boto3==1.23.0 botocore==1.26.0 sagemaker==2.90.0 xtarfile
+
+
+image_building:
+  image: nexus.pitneycloud.com:8443/fusion-platform/awscli-docker-v2:latest
+  tags:
+    - fusion-docker
+  stage: image_building
+  script:
+    - aws ecr describe-repositories --region $AWS_DEFAULT_REGION --repository-names "ml-model" || aws ecr create-repository --region $AWS_DEFAULT_REGION --repository-name ""ml-model""
+    - aws ecr describe-repositories --region $AWS_DEFAULT_REGION --repository-names ""ml-model"" > output.json
+    - REPOSITORY_URL=$(cat output.json | jq -r .repositories[].repositoryUri)
+    - $(aws ecr get-login --no-include-email --region ${AWS_DEFAULT_REGION})
+    - docker build --build-arg ACCESS_KEY_ID_VAR=$AWS_ACCESS_KEY_ID --build-arg SECRET_ACCESS_KEY_VAR=$AWS_SECRET_ACCESS_KEY -t ${REPOSITORY_URL}:latest .
+    - docker push  ${REPOSITORY_URL}:latest
+    - docker rmi -f ${REPOSITORY_URL}:latest # Removing docker image
+    - echo -e "${REPOSITORY_URL}:latest" >> image_url.txt
+    - docker run -d -p 8080:8080 --ipc="host" --name=mltest -e {AWS_ACCESS_KEY_ID} -e ${AWS_SECRET_ACCESS_KEY} -e ${AWS_DEFAULT_REGION} ${REPOSITORY_URL}
+
+  environment:
+    name: $CI_COMMIT_REF_NAME
+  when: manual
+
+lint:
+  stage: lint
+  image: python:3.9
+  tags:
+    - fusion-docker
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install flake8
+  script:
+    - flake8 app.py
+
+  environment:
+    name: $CI_COMMIT_REF_NAME
+  when: manual
+
+qa_deploy_model:
+  stage: qa_deploy
+  image: python:3.8
+  tags:
+    - ml-automation
+  allow_failure: true
+  script:
+      #- chmod +x BRT/fusion-ml-deployment/EBAY-UK/script/check_access.sh
+      #- git clone https://gitlab-ci-token:${GITLAB_PIPELINE_TOKEN}@gitlab.com/pitneybowes/innovation/fusion-platform/fusion-runtime/cbds-backoffice/ML-Automation-BRT-EBAY-UK.git
+      #- rm -rf ML-Automation-BRT-EBAY-UK.git 
+      #- cp -rf ML-Automation-BRT-EBAY-UK/. .
+      #- ./BRT/fusion-ml-deployment/EBAY-UK/script/check_access.sh -u $GITLAB_USER_EMAIL -l ${DEPLOY_USERS}
+      - chmod +x BRT/fusion-ml-deployment/EBAY-UK/environment_variables_qa.sh
+      - source BRT/fusion-ml-deployment/EBAY-UK/environment_variables_qa.sh
+      - cd BRT/fusion-ml-deployment/EBAY-UK/model_deploy/model_deploy/
+      - pip install --no-cache-dir --force-reinstall  -r requirements.txt
+      - python model_package_update.py
+  only:
+    - main
+    - qa
+  environment:
+    name: dev-qa
+  when: manual
+
+
+qa_model_refresh_test:
+  stage: qa_test
+  image: python:3.8
+  tags:
+    - ml-automation
+  allow_failure: true
+  script:
+      - chmod +x BRT/fusion-ml-deployment/EBAY-UK/environment_variables_qa.sh
+      - source BRT/fusion-ml-deployment/EBAY-UK/environment_variables_qa.sh
+      - chmod +x BRT/fusion-ml-train/EBAY-UK/model_train/pipelines/code/threshold_value.sh
+      - source BRT/fusion-ml-train/EBAY-UK/model_train/pipelines/code/threshold_value.sh
+      - pip install -r BRT/fusion-ml-deployment/EBAY-UK/model_test/requirements.txt
+      - pytest --tb=short --junitxml=model-refresh.xml --html=report.html --self-contained-html --cov --cov-report=html BRT/fusion-ml-deployment/EBAY-UK/model_test/scripts/Model-Refresh/Model-Refresh.py
+      - ls
+      # - cp results.csv ${CI_PROJECT_DIR}/
+      # - cp report.html ${CI_PROJECT_DIR}/
+      # - cp model-refresh.xml ${CI_PROJECT_DIR}/
+      # - cp -R htmlcov ${CI_PROJECT_DIR}/ 
+  artifacts:
+    when: always
+    name: "model_refresh_report"
+    paths:
+    - results.csv
+    - report.html 
+    - htmlcov    
+    reports:
+      junit: model-refresh.xml
+  only:
+    - qa
+    - main
+  environment:
+    name: dev-qa
+  when: manual
+
+qa_api_validation_test:
+  stage: qa_test
+  image: python:3.8
+  tags:
+    - ml-automation
+  allow_failure: true
+  script:
+      - chmod +x BRT/fusion-ml-deployment/EBAY-UK/environment_variables_qa.sh
+      - source BRT/fusion-ml-deployment/EBAY-UK/environment_variables_qa.sh
+      - chmod +x BRT/fusion-ml-train/EBAY-UK/model_train/pipelines/code/threshold_value.sh
+      - source BRT/fusion-ml-train/EBAY-UK/model_train/pipelines/code/threshold_value.sh
+      - pip install -r BRT/fusion-ml-deployment/EBAY-UK/model_test/requirements.txt
+      - pytest --tb=short --html=report-api.html  --self-contained-html --cov --cov-report=html BRT/fusion-ml-deployment/EBAY-UK/model_test/scripts/API_Validation/Api-Validation.py
+      - ls
+      # - cp test_cases_positive.csv ${CI_PROJECT_DIR}/
+      # - cp test_cases_negative.csv ${CI_PROJECT_DIR}/
+      # - cp report-api.html ${CI_PROJECT_DIR}/
+      # - cp -R htmlcov ${CI_PROJECT_DIR}/
+  # coverage: '/TOTAL.*\s([.\d]+)%/'     
+  artifacts:
+    when: always
+    name: "api_validation_report"
+    paths:
+    - report-api.html
+    - htmlcov
+  only:
+    - qa
+    - main
+  environment:
+    name: dev-qa
+  when: manual
+
+
